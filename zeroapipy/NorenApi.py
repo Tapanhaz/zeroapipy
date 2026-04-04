@@ -1,4 +1,5 @@
 import json
+import struct
 import requests
 import threading
 import websocket
@@ -10,6 +11,7 @@ import time
 import urllib
 from time import sleep
 from datetime import datetime as dt
+import websocket._app as _ws_app
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,7 @@ def reporterror(msg):
 def reportinfo(msg):
     #print(msg)
     logger.info(msg)
+
 
 class NorenApi:
     __service_config = {
@@ -116,6 +119,7 @@ class NorenApi:
         self.__market_status_messages = []
         self.__exchange_messages = []
         self.__OAuthHeaders = None
+        self.ws_auth_failed = False
 
 
     #def __ws_run_forever(self):
@@ -156,7 +160,7 @@ class NorenApi:
         if web:
             values              = { "t": "c" }
         else:
-            values              = { "t": "c" }
+            values              = { "t": "a" }
 
         values["uid"]       = self.__username        
         values["actid"]     = self.__username
@@ -217,7 +221,7 @@ class NorenApi:
             if res['t'] == 'ck' and res['s'] == 'OK':
                 self.__on_open()
                 return
-
+    
 
     def start_websocket(self, subscribe_callback = None, 
                         order_update_callback = None,
@@ -244,32 +248,60 @@ class NorenApi:
         url = f"{self.__service_config['websocket_endpoint']}/{access_token}"
         reportmsg('connecting to {}'.format(url))
 
-        self.__websocket = websocket.WebSocketApp(url,
-                                                on_data=self.__on_data_callback,
-                                                on_error=self.__on_error_callback,
-                                                on_close=self.__on_close_callback,
-                                                on_open= lambda ws: self.__on_open_callback(ws= ws, web= web, access_token= access_token))
-        #th = threading.Thread(target=self.__send_heartbeat)
-        #th.daemon = True
-        #th.start()
-        #if run_in_background is True:
-        #self.__ws_thread = threading.Thread(target=self.__ws_run_forever)
-        #self.__ws_thread.daemon = True
-        #self.__ws_thread.start()
+        api_self = self 
+
+        websocket_run_forever = _ws_app.WebSocketApp.run_forever
+
+        def __run_forever(ws_app, *args, **kwargs):
+            reconnect = kwargs.get('reconnect', 0)
+            _recv_frame = websocket.WebSocket.recv_frame
+
+            def __recv_frame(ws_inner):
+                frame = _recv_frame(ws_inner)
+                if (
+                        reconnect
+                        and frame.opcode == websocket.ABNF.OPCODE_CLOSE
+                        and len(frame.data) >= 2
+                        and struct.unpack('!H', frame.data[:2])[0] == 1008
+                        ):
+                    ws_app.keep_running = False
+                    api_self.ws_auth_failed = True
+                return frame
+
+            websocket.WebSocket.recv_frame = __recv_frame
+            try:
+                return websocket_run_forever(ws_app, *args, **kwargs)
+            finally:
+                websocket.WebSocket.recv_frame = _recv_frame
+
+        _ws_app.WebSocketApp.run_forever = __run_forever
+
+        self.__websocket = websocket.WebSocketApp(
+                                                    url,
+                                                    on_data=self.__on_data_callback,
+                                                    on_error=self.__on_error_callback,
+                                                    on_close=self.__on_close_callback,
+                                                    on_open= lambda ws: self.__on_open_callback(
+                                                                                                    ws= ws, 
+                                                                                                    web= web, 
+                                                                                                    access_token= access_token
+                                                                                                )
+                                            )
 
         threading.Thread(
             target=self.__websocket.run_forever,
-            kwargs=dict(ping_interval=3, ping_timeout=2, ping_payload='{"t":"h"}', reconnect=1),
+            kwargs=dict(ping_interval=3, ping_timeout=2, ping_payload='{"t":"h"}', reconnect=1), 
             daemon=True
         ).start()
+
         
     def close_websocket(self):
-        if self.__websocket_connected == False:
+        if not self.__websocket_connected:
             return
         self.__stop_event.set()        
         self.__websocket_connected = False
         self.__websocket.close()
-        self.__ws_thread.join()
+        #self.__ws_thread.join()
 
     ###### OAuth Update ###### 
     def getOAuthURL(self, oauth_url, api_key=None): 
