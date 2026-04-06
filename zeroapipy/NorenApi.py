@@ -242,8 +242,9 @@ class NorenApi:
             self.__subscribe_callback(res)
         elif t == 'om':
             self.__order_update_callback(res)
-        elif t == 'ak':
-            if res['s'] != 'OK': self.__on_error(res)
+        elif t in {'ak', 'ck'}:
+            if res['s'] != 'OK': 
+                self.__on_error(res)
             else:
                 if self.__resubscribe:
                     if self.__tl_set: 
@@ -261,7 +262,8 @@ class NorenApi:
                         socket_close_callback = None,
                         socket_error_callback = None,
                         access_token = None,
-                        resubscribe = True):    
+                        resubscribe = True
+                    ):    
         """ Start a websocket connection for getting live data """
         self.__on_open = socket_open_callback
         self.__on_disconnect = socket_close_callback
