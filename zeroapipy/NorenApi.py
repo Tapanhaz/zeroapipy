@@ -1,4 +1,5 @@
 import json
+import orjson
 import struct
 import requests
 import threading
@@ -119,7 +120,16 @@ class NorenApi:
         self.__market_status_messages = []
         self.__exchange_messages = []
         self.__OAuthHeaders = None
+
         self.ws_auth_failed = False
+        self.__resubscribe = False
+
+        self.__tl_set = set() 
+        self.__sq_set = set()
+
+
+        for attr in ('__subscribe_callback', '__order_update_callback', '__on_error', '__on_open', '__broadcast_callback'):
+            setattr(self, attr, self.__dummy_callback)
 
 
     #def __ws_run_forever(self):
@@ -133,7 +143,8 @@ class NorenApi:
     #        sleep(0.1) # Sleep for 100ms between reconnection.
 
     def __ws_send(self, *args, **kwargs):
-        while self.__websocket_connected == False:
+        #while self.__websocket_connected == False:
+        while not self.__websocket_connected:
             sleep(0.05)  # sleep for 50ms if websocket is not connected, wait for reconnection
         with self.__ws_mutex:
             ret = self.__websocket.send(*args, **kwargs)
@@ -152,6 +163,9 @@ class NorenApi:
         self.__access_token = access_token
         self.__username = uid
         self.__accountid = accountid
+    
+    def __dummy_callback(self, msg= None):
+        pass
 
     def __on_open_callback(self, ws=None, web: bool= False, access_token: str= None):
         self.__websocket_connected = True
@@ -193,12 +207,13 @@ class NorenApi:
 
     def __on_data_callback(self, ws=None, message=None, data_type=None, continue_flag=None):
         #print(ws)
-        #print(message)
+        print(message)
         #print(data_type)
         #print(continue_flag)
 
-        res = json.loads(message)
+        res = orjson.loads(message)
 
+        '''
         if(self.__subscribe_callback is not None):
             if res['t'] == 'tk' or res['t'] == 'tf':
                 self.__subscribe_callback(res)
@@ -208,7 +223,7 @@ class NorenApi:
                 return
 
         if(self.__on_error is not None):
-            if res['t'] == 'ck' and res['s'] != 'OK':
+            if res['t'] == 'ak' and res['s'] != 'OK':
                 self.__on_error(res)
                 return
 
@@ -218,9 +233,26 @@ class NorenApi:
                 return
 
         if self.__on_open:
-            if res['t'] == 'ck' and res['s'] == 'OK':
+            if res['t'] == 'ak' and res['s'] == 'OK':
                 self.__on_open()
                 return
+        '''
+        t = res['t']
+        if t in {'df', 'tf', 'dk', 'tk'}:
+            self.__subscribe_callback(res)
+        elif t == 'om':
+            self.__order_update_callback(res)
+        elif t == 'ak':
+            if res['s'] != 'OK': self.__on_error(res)
+            else:
+                if self.__resubscribe:
+                    if self.__tl_set: 
+                        self.subscribe(list(self.__tl_set), FeedType.TOUCHLINE)
+                    if self.__sq_set: 
+                        self.subscribe(list(self.__sq_set), FeedType.SNAPQUOTE)
+                self.__on_open()
+        elif t in {'am', 'ms'}:
+            self.__broadcast_callback(res)
     
 
     def start_websocket(self, subscribe_callback = None, 
@@ -228,7 +260,8 @@ class NorenApi:
                         socket_open_callback = None,
                         socket_close_callback = None,
                         socket_error_callback = None,
-                        access_token = None):    
+                        access_token = None,
+                        resubscribe = True):    
         """ Start a websocket connection for getting live data """
         self.__on_open = socket_open_callback
         self.__on_disconnect = socket_close_callback
@@ -242,8 +275,10 @@ class NorenApi:
             web = True
         else:
             access_token = self.__access_token
+        
+        self.__resubscribe = resubscribe
 
-        reportmsg(access_token)
+        #reportmsg(access_token)
 
         url = f"{self.__service_config['websocket_endpoint']}/{access_token}"
         reportmsg('connecting to {}'.format(url))
@@ -369,17 +404,20 @@ class NorenApi:
         pwd = hashlib.sha256(password.encode('utf-8')).hexdigest()
         u_appkey = '{0}|{1}'.format(userid, api_secret)
         appkey=hashlib.sha256(u_appkey.encode('utf-8')).hexdigest()
+
         #prepare the data
+
         if access_type == None:
             values = { "source": "API" , "apkversion": "1.0.0"}
         else:
             values = { "source": access_type , "apkversion": "1.0.0"}
+
         values["uid"]       = userid
         values["pwd"]       = pwd
         values["factor2"]   = twoFA
         values["vc"]        = vendor_code
         values["appkey"]    = appkey        
-        values["imei"]      = imei        
+        values["imei"]      = imei      
 
         payload = 'jData=' + json.dumps(values)
         reportmsg("Req:" + payload)
@@ -390,6 +428,7 @@ class NorenApi:
         resDict = json.loads(res.text)
         if resDict['stat'] != 'Ok':            
             return None
+        
         #reportmsg(self.__susertoken)
 
         return resDict['susertoken']
@@ -464,6 +503,7 @@ class NorenApi:
 
         return resDict
 
+    '''
     def subscribe(self, instrument, feed_type=FeedType.TOUCHLINE):
         values = {}
 
@@ -483,7 +523,25 @@ class NorenApi:
 
         #print(data)
         self.__ws_send(data)
+    '''
 
+    def subscribe(self, instrument, feed_type=FeedType.TOUCHLINE, batch_size= 30, delay= .1):
+        t = threading.Thread(target=self.__subscribe_worker, args=(instrument, feed_type, batch_size, delay), daemon=True)
+        t.start()
+
+    def __subscribe_worker(self, instrument, feed_type, batch_size, delay):
+        ft = {'t':'t', FeedType.TOUCHLINE:'t', 'd':'d', FeedType.SNAPQUOTE:'d'}.get(feed_type)
+
+        if not ft: return
+
+        tokens = instrument if isinstance(instrument, list) else [instrument]
+
+        if self.__resubscribe:
+            (self.__tl_set if ft=='t' else self.__sq_set).update(tokens)
+
+        [self.__ws_send(json.dumps({'t':ft,'k':'#'.join(tokens[i:i+batch_size])})) or time.sleep(delay) for i in range(0,len(tokens),batch_size)]
+
+    '''
     def unsubscribe(self, instrument, feed_type=FeedType.TOUCHLINE):
         values = {}
 
@@ -501,6 +559,19 @@ class NorenApi:
 
         #print(data)
         self.__ws_send(data)
+    '''
+
+    def unsubscribe(self, instrument, feed_type=FeedType.TOUCHLINE):
+        ft = {'t':'u', FeedType.TOUCHLINE:'u', 'd':'ud', FeedType.SNAPQUOTE:'ud'}.get(feed_type)
+
+        if not ft: return
+
+        tokens = instrument if isinstance(instrument, list) else [instrument]
+
+        if self.__resubscribe:
+            (self.__tl_set if ft=='u' else self.__sq_set).difference_update(tokens)
+
+        self.__ws_send(json.dumps({'t':ft,'k':'#'.join(tokens)}))
 
     def subscribe_orders(self):
         values = {'t': 'o'}
@@ -879,11 +950,11 @@ class NorenApi:
         config = NorenApi.__service_config
 
         #prepare the uri
-        url = f"{config['host']}{config['routes']['tradebook']}" 
+        url = f"{config['host']}{config['routes']['tradebook']}"
         reportmsg(url)
 
         #prepare the data
-        values              = {'ordersource':'API'}
+        values              = {} #{'ordersource':'API'}
         values["uid"]       = self.__username
         values["actid"]     = self.__accountid
         
@@ -899,7 +970,7 @@ class NorenApi:
         
         #error is a json with stat and msg wchih we printed earlier.
         if type(resDict) != list:                            
-                return None
+            return None
 
         return resDict
 
