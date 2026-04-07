@@ -207,7 +207,7 @@ class NorenApi:
 
     def __on_data_callback(self, ws=None, message=None, data_type=None, continue_flag=None):
         #print(ws)
-        print(message)
+        #print(message)
         #print(data_type)
         #print(continue_flag)
 
