@@ -111,11 +111,11 @@ class NorenApi:
         self.__websocket = None
         self.__websocket_connected = False
         self.__ws_mutex = threading.Lock()
-        self.__on_error = None
-        self.__on_disconnect = None
-        self.__on_open = None
-        self.__subscribe_callback = None
-        self.__order_update_callback = None
+        #self.__on_error = None
+        #self.__on_disconnect = None
+        #self.__on_open = None
+        #self.__subscribe_callback = None
+        #self.__order_update_callback = None
         self.__subscribers = {}
         self.__market_status_messages = []
         self.__exchange_messages = []
@@ -126,10 +126,16 @@ class NorenApi:
 
         self.__tl_set = set() 
         self.__sq_set = set()
+        
+        __clsname = __class__.__name__
+        
+        for attr in (
+            'subscribe_callback', 'order_update_callback', 
+            'on_error', 'on_open', 'broadcast_callback',
+            'on_disconnect'
+                ):
 
-
-        for attr in ('__subscribe_callback', '__order_update_callback', '__on_error', '__on_open', '__broadcast_callback'):
-            setattr(self, attr, self.__dummy_callback)
+            setattr(self, f"_{__clsname}__{attr}", self.__dummy_callback)
 
 
     #def __ws_run_forever(self):
@@ -256,20 +262,29 @@ class NorenApi:
             self.__broadcast_callback(res)
     
 
-    def start_websocket(self, subscribe_callback = None, 
-                        order_update_callback = None,
-                        socket_open_callback = None,
-                        socket_close_callback = None,
-                        socket_error_callback = None,
-                        access_token = None,
-                        resubscribe = True
+    def start_websocket(
+                    self, 
+                    subscribe_callback = None, 
+                    order_update_callback = None,
+                    socket_open_callback = None,
+                    socket_close_callback = None,
+                    socket_error_callback = None,
+                    access_token = None,
+                    resubscribe = True
                     ):    
+                    
         """ Start a websocket connection for getting live data """
-        self.__on_open = socket_open_callback
-        self.__on_disconnect = socket_close_callback
-        self.__on_error = socket_error_callback
-        self.__subscribe_callback = subscribe_callback
-        self.__order_update_callback = order_update_callback
+        if socket_open_callback:
+            self.__on_open = socket_open_callback
+        if socket_close_callback:
+            self.__on_disconnect = socket_close_callback
+        if socket_error_callback:
+            self.__on_error = socket_error_callback
+        if subscribe_callback:
+            self.__subscribe_callback = subscribe_callback
+        if order_update_callback:
+            self.__order_update_callback = order_update_callback
+
         self.__stop_event = threading.Event()
         web = False
 
